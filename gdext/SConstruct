@@ -13,28 +13,6 @@ import shutil
 import subprocess
 import SCons
 import sys
-
-
-def check_submodules():
-    """Ensure all git submodules are checked out and up to date."""
-    git_dir = Path(__file__).resolve().parent
-    try:
-        r = subprocess.run(
-            ["git", "submodule", "status", "--recursive"],
-            capture_output=True, text=True, cwd=git_dir
-        )
-    except FileNotFoundError:
-        return  # git not available, skip
-
-    if r.returncode != 0:
-        return
-
-    missing = [line for line in r.stdout.splitlines() if line.startswith("-") or line.startswith("+")]
-    if missing:
-        print("⚠  uninitialized or outdated submodules detected, pulling...")
-        subprocess.run(["git", "submodule", "update", "--init", "--recursive"], cwd=git_dir, check=True)
-
-
 class CustomCacheDir(SCons.CacheDir.CacheDir):
     @classmethod
     def copy_to_cache(cls, env, src, dst) -> str:
@@ -45,7 +23,6 @@ class CustomCacheDir(SCons.CacheDir.CacheDir):
         return None
 
 
-check_submodules()
 env = SConscript("godot-cpp/SConstruct")
 env.CacheDir("scons_cache", CustomCacheDir)
 env.Append(CPPDEFINES=['IMGUI_USER_CONFIG="\\"imconfig-godot.h\\""', "IGN_EXPORT"])
