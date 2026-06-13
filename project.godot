@@ -12,7 +12,7 @@ config_version=5
 
 config/name="Dear ImGui for Godot Demo"
 run/main_scene="res://data/demo.tscn"
-config/features=PackedStringArray("4.3", "C#")
+config/features=PackedStringArray("4.3")
 run/max_fps=60
 config/icon="res://data/icon.svg"
 
@@ -28,10 +28,6 @@ window/subwindows/embed_subwindows=false
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
 window/vsync/vsync_mode=0
-
-[dotnet]
-
-project/assembly_name="Dear ImGui for Godot Demo"
 
 [editor_plugins]
 
