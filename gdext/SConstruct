@@ -1,4 +1,11 @@
 #!/usr/bin/env python
+# ── Required system libraries ─────────────────────────────────────────────
+#   freetype2   Arch: freetype2          Debian/Ubuntu: libfreetype-dev
+#   libpng      Arch: libpng             Debian/Ubuntu: libpng-dev
+#   zlib        Arch: zlib               Debian/Ubuntu: zlib1g-dev
+#   bzip2       Arch: bzip2              Debian/Ubuntu: libbz2-dev
+#   brotli      Arch: brotli             Debian/Ubuntu: libbrotli-dev
+# ──────────────────────────────────────────────────────────────────────────
 from glob import glob
 from pathlib import Path
 import os
@@ -6,6 +13,26 @@ import shutil
 import subprocess
 import SCons
 import sys
+
+
+def check_submodules():
+    """Ensure all git submodules are checked out and up to date."""
+    git_dir = Path(__file__).resolve().parent
+    try:
+        r = subprocess.run(
+            ["git", "submodule", "status", "--recursive"],
+            capture_output=True, text=True, cwd=git_dir
+        )
+    except FileNotFoundError:
+        return  # git not available, skip
+
+    if r.returncode != 0:
+        return
+
+    missing = [line for line in r.stdout.splitlines() if line.startswith("-") or line.startswith("+")]
+    if missing:
+        print("⚠  uninitialized or outdated submodules detected, pulling...")
+        subprocess.run(["git", "submodule", "update", "--init", "--recursive"], cwd=git_dir, check=True)
 
 
 class CustomCacheDir(SCons.CacheDir.CacheDir):
@@ -18,6 +45,7 @@ class CustomCacheDir(SCons.CacheDir.CacheDir):
         return None
 
 
+check_submodules()
 env = SConscript("godot-cpp/SConstruct")
 env.CacheDir("scons_cache", CustomCacheDir)
 env.Append(CPPDEFINES=['IMGUI_USER_CONFIG="\\"imconfig-godot.h\\""', "IGN_EXPORT"])
@@ -32,22 +60,69 @@ if config == "release":
     if windows:
         env.Append(CPPDEFINES=["NDEBUG"])
 
+# -- system library detection (replaces vcpkg) --
+ext_libpath = []
+ext_libs = []
+ext_cpppath = []
+
+def parse_pkgconfig(pkg, libpath, cpppath, libs):
+    """Run pkg-config and extract -I/-L/-l flags into the given lists."""
+    try:
+        r = subprocess.run(
+            ["pkg-config", "--cflags", "--libs", pkg],
+            capture_output=True, text=True, check=True
+        )
+        for flag in r.stdout.strip().split():
+            if flag.startswith("-I"):   cpppath.append(flag[2:])
+            elif flag.startswith("-L"): libpath.append(flag[2:])
+            elif flag.startswith("-l"): libs.append(flag[2:])
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+def check_header(path):
+    return os.path.isfile(path) and os.access(path, os.R_OK)
+
 if windows:
     if env["arch"] == "arm64":
         triplet = "arm64-windows-static"
     else:
         triplet = "x64-windows-static"
-    if not os.path.exists(f"vcpkg_installed/{triplet}"):
-        subprocess.call(f'"%VCPKG_ROOT%/vcpkg" install --triplet {triplet}', shell=True)
-elif linux:
-    triplet = "x64-linux"
-    if not os.path.exists("vcpkg_installed"):
-        subprocess.call("$VCPKG_ROOT/vcpkg install", shell=True)
-else:
-    triplet = "arm64-osx"
-    if not os.path.exists("vcpkg_installed"):
-        if subprocess.call("zsh scripts/vcpkg-macos.sh", shell=True) != 0:
+    vcpkg_root = os.environ.get("VCPKG_ROOT", "")
+    if vcpkg_root and not os.path.exists(f"vcpkg_installed/{triplet}"):
+        subprocess.call(f'"{vcpkg_root}/vcpkg" install --triplet {triplet}', shell=True)
+    ext_cpppath.append(f"vcpkg_installed/{triplet}/include")
+    ext_libpath.append(f"vcpkg_installed/{triplet}/lib")
+    ext_libs += ["freetype", "bz2", "libpng16", "zlib", "brotlidec", "brotlicommon"]
+
+elif env["platform"] == "macos":
+    if not parse_pkgconfig("freetype2", ext_libpath, ext_cpppath, ext_libs):
+        # fallback: homebrew
+        brew = subprocess.run(["brew", "--prefix"], capture_output=True, text=True)
+        if brew.returncode == 0 and brew.stdout.strip():
+            p = brew.stdout.strip()
+            ext_cpppath += [f"{p}/include", f"{p}/include/freetype2"]
+            ext_libpath.append(f"{p}/lib")
+        else:
+            print("ERROR: freetype2 not found. Install: brew install freetype")
             sys.exit(1)
+    ext_libs += ["bz2", "png16", "z", "brotlidec", "brotlicommon"]
+
+else:
+    # Linux / BSD
+    if not parse_pkgconfig("freetype2", ext_libpath, ext_cpppath, ext_libs):
+        for inc in ["/usr/include/freetype2", "/usr/local/include/freetype2"]:
+            if check_header(f"{inc}/ft2build.h"):
+                ext_cpppath.append(inc)
+                ext_libs.append("freetype")
+                break
+        else:
+            print("ERROR: freetype2 dev files not found! Install: libfreetype-dev / freetype-devel")
+            sys.exit(1)
+    ext_libs += ["bz2", "png16", "z", "brotlidec", "brotlicommon"]
+
+env.Append(CPPPATH=ext_cpppath)
+# -- end system library detection --
 
 if not os.path.exists("gen/imgui_bindings.gen.h"):
     subprocess.call("python scripts/gds_bindings.py", shell=True)
@@ -65,20 +140,11 @@ libpath = env.get("LIBPATH", [])
 libs = [env["LIBS"]]
 
 env.Append(CPPPATH=["imgui/misc/freetype/"])
-env.Append(CPPPATH=[f"vcpkg_installed/{triplet}/include"])
 env.Append(CPPDEFINES=["IMGUI_ENABLE_FREETYPE"])
 # env.Append(CPPDEFINES=["IMGUI_ENABLE_FREETYPE_LUNASVG"])
 sources += Glob("imgui/misc/freetype/*.cpp")
-libpath += [f"vcpkg_installed/{triplet}/lib"]
-libs += [
-    "freetype",
-    # "lunasvg",
-    "bz2",
-    "libpng16" if windows else "png16",
-    "zlib" if windows else "z",
-    "brotlidec",
-    "brotlicommon",
-]
+libpath += ext_libpath
+libs += ext_libs
 
 if env["platform"] == "macos":
     library = env.SharedLibrary(
